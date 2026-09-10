@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "id": "mghizdavet.things",
+  "name": "Things",
+  "version": "1.0.0",
+  "author": "Marius Ghizdavet",
+  "license": "MIT",
+  "homepage": "https://github.com/MariusGhizdavet/omarchy-things",
+  "repository": "https://github.com/MariusGhizdavet/omarchy-things.git",
+  "description": "Things 3 in the Omarchy bar: all seven views (Today, Upcoming, Anytime, Someday, Inbox, Projects, Logbook) plus search, with quick-add, scheduling, moving and checklists — backed by the things3 Cloud CLI. Speaks 10 languages, following the system locale by default.",
+  "keywords": [
+    "things",
+    "tasks",
+    "todo",
+    "gtd",
+    "productivity"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Things",
+    "description": "The current view's task count in the bar, with a panel to work the list: complete, quick-add, schedule, move, rename and delete.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "Auto",
+      "defaultView": "Today",
+      "refreshIntervalSec": 300,
+      "refreshIntervalOnBatterySec": 900,
+      "logbookDays": 14,
+      "quickAddTarget": "Inbox",
+      "showCount": true,
+      "showNotes": true,
+      "confirmDelete": true
+    },
+    "schema": [
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": [
+          "Auto",
+          "English",
+          "Română",
+          "Deutsch",
+          "Français",
+          "Español",
+          "Italiano",
+          "Português (BR)",
+          "Polski",
+          "Русский",
+          "中文 (简体)"
+        ],
+        "defaultValue": "Auto",
+        "description": "Auto follows the system locale and falls back to English when it is not one of the translated languages."
+      },
+      {
+        "key": "defaultView",
+        "type": "enum",
+        "label": "View the panel opens on",
+        "options": [
+          "Today",
+          "Upcoming",
+          "Anytime",
+          "Someday",
+          "Inbox",
+          "Projects",
+          "Logbook"
+        ],
+        "defaultValue": "Today",
+        "description": "Also the view whose count and icon the bar pill shows. Middle-click the pill to cycle."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval on mains power (seconds)",
+        "min": 60,
+        "max": 7200,
+        "step": 30,
+        "defaultValue": 300,
+        "description": "Every refresh is one Things Cloud sync — the cadence used while the laptop runs on mains power, and always on a desktop."
+      },
+      {
+        "key": "refreshIntervalOnBatterySec",
+        "type": "integer",
+        "label": "Refresh interval on battery (seconds)",
+        "min": 60,
+        "max": 7200,
+        "step": 60,
+        "defaultValue": 900,
+        "description": "A sync wakes the radio, so a slower cadence is worth it on battery."
+      },
+      {
+        "key": "logbookDays",
+        "type": "integer",
+        "label": "Days of Logbook to load",
+        "min": 1,
+        "max": 90,
+        "step": 1,
+        "defaultValue": 14,
+        "description": "How far back the Logbook view reaches. \"Done today\" is counted from this window."
+      },
+      {
+        "key": "quickAddTarget",
+        "type": "enum",
+        "label": "Where quick-add puts a new task",
+        "options": [
+          "Inbox",
+          "Current view"
+        ],
+        "defaultValue": "Inbox",
+        "description": "An open project always wins over this setting, and a #project written on the line wins over both."
+      },
+      {
+        "key": "showCount",
+        "type": "boolean",
+        "label": "Show the count in the bar",
+        "defaultValue": true,
+        "description": "Turned off, the bar keeps only the view's icon."
+      },
+      {
+        "key": "showNotes",
+        "type": "boolean",
+        "label": "Show a line of notes under each task",
+        "defaultValue": true,
+        "description": "A pasted link is shown as its host and path, and opens in your browser."
+      },
+      {
+        "key": "confirmDelete",
+        "type": "boolean",
+        "label": "Ask before deleting a task",
+        "defaultValue": true,
+        "description": "Turned off, the delete action and the x key remove the task immediately."
+      }
+    ]
+  }
+}

@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Un singur instantaneu Things 3 pentru widget-ul din bară.
+
+Panoul nu vorbește el cu Things Cloud și nu pornește zece procese ca să-și
+umple cele opt vederi: rulează scriptul ăsta, care întreabă CLI-ul `things3`
+și scrie *un* JSON cu tot ce-i trebuie panoului — task-urile, apartenența lor
+la vederi, proiectele cu progres, ariile, etichetele și numărătorile.
+
+De ce merită un helper și nu opt `Process` în QML:
+
+  * Sincronizarea costă. `things3 <vedere>` face un sync cu norul la fiecare
+    rulare (~700 ms); `things3 --no-sync <vedere>` citește cache-ul local în
+    ~4 ms. Deci se face **un** sync, apoi toate celelalte întrebări merg pe
+    cache. Opt procese pornite din QML ar fi făcut opt sincronizări.
+
+  * Apartenența la vederi e a CLI-ului, nu a noastră. „Today" nu înseamnă
+    `scheduled_at == azi` — înseamnă și restanțele, și serile, și instanțele
+    recurente de azi. Regula aia trăiește în `things3 today`; o reimplementare
+    în JS ar diverge tăcut. Așa că vederile dau *listele de id-uri*, iar
+    detaliul fiecărui task vine dintr-un singur `find --any-status`.
+
+  * O eroare de rețea nu trebuie să golească panoul. Dacă sincronizarea pică,
+    instantaneul se compune oricum din cache și duce eroarea cu el, ca panoul
+    să poată arăta datele vechi cu un semn că sunt vechi.
+
+Ieșire: JSON pe stdout, întotdeauna un obiect, întotdeauna cu `ok`. Erorile
+nu se scriu pe stderr ca să moară în jurnal — intră în JSON, fiindcă singurul
+lor cititor e panoul.
+"""
+
+import argparse
+import json
+import re
+import os
+import subprocess
+import sys
+from datetime import date, datetime, timedelta, timezone
+
+CLI = "things3"
+
+# Sincronizarea are voie să dureze (rețea); citirile din cache, nu. Dacă o
+# citire locală nu răspunde în două secunde, ceva e rupt și e mai bine să
+# raportăm decât să lăsăm panoul să aștepte.
+SYNC_TIMEOUT = 25
+READ_TIMEOUT = 10
+
+
+class CliError(Exception):
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+def run(args, timeout, sync=False):
+    """Rulează `things3` și întoarce textul de pe stdout.
+
+    `--no-sync` e opțiune *globală*, deci stă înaintea subcomenzii — pusă
+    după, clap o respinge ca argument necunoscut al subcomenzii.
+    """
+    argv = [CLI] + ([] if sync else ["--no-sync"]) + list(args)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            # Fără moștenirea unui stdin de terminal: helperul rulează dintr-un
+            # proces grafic și nu are ce citi de la tastatură.
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise CliError("missing", "things3 nu este instalat")
+    except subprocess.TimeoutExpired:
+        raise CliError("timeout", "things3 %s a depășit timpul" % " ".join(args[:1]))
+
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+        kind = "auth" if "auth" in err.lower() or "credential" in err.lower() else "cli"
+        raise CliError(kind, err.splitlines()[0] if err else "things3 a eșuat")
+
+    return proc.stdout or ""
+
+
+def run_json(args, timeout, sync=False, default=None):
+    raw = run(args, timeout, sync=sync).strip()
+    if not raw:
+        return default if default is not None else []
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise CliError("cli", "things3 %s a răspuns cu ceva ce nu e JSON" % " ".join(args[:1]))
+
+
+# --------------------------------------------------------------- normalizare
+
+_ISO = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})"
+    r"[T ](\d{2}):(\d{2}):(\d{2})"
+    r"(?:\.(\d+))?"
+    r"(Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def _moment(text):
+    """Timestamp-ul Things ca datetime, sau None dacă nu se poate citi.
+
+    `datetime.fromisoformat` nu ia nanosecundele pe care le scrie CLI-ul
+    („...02.031327963+00:00"), de aceea se parsează cu regex.
+    """
+    m = _ISO.match(str(text or "").strip())
+    if not m:
+        return None
+    an, luna, zi, ora, minut, secunda = (int(m.group(i)) for i in range(1, 7))
+    fus = m.group(8)
+    if fus in (None, ""):
+        return datetime(an, luna, zi, ora, minut, secunda)
+    if fus == "Z":
+        decalaj = timedelta(0)
+    else:
+        semn = 1 if fus[0] == "+" else -1
+        corp = fus[1:].replace(":", "")
+        decalaj = timedelta(hours=int(corp[:2]), minutes=int(corp[2:4])) * semn
+    return datetime(an, luna, zi, ora, minut, secunda, tzinfo=timezone(decalaj))
+
+
+def _local(dt):
+    """Momentul în ora locală, ca datetime fără fus."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone().replace(tzinfo=None)
+
+
+def zi_moment(stamp):
+    """Ziua în care s-a petrecut un moment real — creat, modificat, bifat.
+
+    Aici nu se rotunjește nimic: un task bifat la 23:40 a fost bifat în ziua
+    aia, nu în următoarea.
+    """
+    if not stamp:
+        return None
+    dt = _moment(stamp)
+    if dt is None:
+        return str(stamp)[:10] or None
+    return _local(dt).date().isoformat()
+
+
+def zi_reper(stamp):
+    """Ziua calendaristică a unui *reper* — programarea și termenul.
+
+    Câmpurile astea nu sunt momente, sunt zile; Things le codează însă ca
+    timestamp-uri, și în două forme diferite:
+
+      `--when today`       -> 2026-09-10T00:00:00+00:00   (miezul nopții UTC)
+      `--when 2026-09-11`  -> 2026-09-10T21:00:00+00:00   (miezul nopții local)
+
+    Prima e o zi „plutitoare" și se ia ca atare — convertită în ora locală ar
+    aluneca cu o zi pentru oricine e destul de departe de UTC.
+
+    A doua se citește în ora locală, dar **rotunjită** la cel mai apropiat
+    miez de noapte, nu trunchiată. Motivul e o eroare a CLI-ului: el aplică
+    decalajul de *azi* datei-țintă, așa că o dată de peste trecerea la ora de
+    iarnă iese cu o oră pe lângă — `--when 2026-11-15`, cerut vara, ajunge
+    `2026-11-14T21:00:00+00:00`, adică 23:00 pe 14 în ora locală. Trunchiat,
+    task-ul apărea cu o zi mai devreme; rotunjit, cade unde a fost cerut.
+    O oră lipsă nu poate muta rezultatul, fiindcă un reper stă întotdeauna
+    lângă un miez de noapte, niciodată la mijlocul zilei.
+    """
+    if not stamp:
+        return None
+    dt = _moment(stamp)
+    if dt is None:
+        return str(stamp)[:10] or None
+
+    if dt.tzinfo is not None and dt.utcoffset() == timedelta(0) \
+            and (dt.hour, dt.minute, dt.second) == (0, 0, 0):
+        return dt.date().isoformat()
+
+    loc = _local(dt)
+    zi = loc.date()
+    if loc.hour >= 12:
+        zi = zi + timedelta(days=1)
+    return zi.isoformat()
+
+
+def ref(obj):
+    """Referință compactă {id, title} pentru proiect / arie / titlu de secțiune."""
+    if not isinstance(obj, dict):
+        return None
+    ident = obj.get("id")
+    if not ident:
+        return None
+    return {"id": ident, "title": obj.get("title") or ""}
+
+
+# Unitățile de recurență ale lui Things, așa cum apar în `rule.fu`. Valorile
+# de aici sunt cele **verificate pe date reale**, comparând regula cu zilele
+# instanțelor pe care le-a produs:
+#
+#   fu=16,  fa=5, pași de exact 5 zile           -> „la 5 zile"
+#   fu=256, fa=1, pași de 7 zile, toate miercuri -> „săptămânal"
+#   fu=8,   fa=1, pași de ~31 zile, ziua 9       -> „lunar"
+#
+# `fu=4` nu se putea verifica la fel — un task anual n-are un al doilea
+# exemplar din care să-i măsori pasul. Things are însă exact patru unități
+# (zi / săptămână / lună / an), trei erau deja fixate de datele de mai sus,
+# deci a rămas una singură; iar autorul task-ului a confirmat că e anual.
+#
+# O valoare `fu` în afara tabelului iese ca „se repetă", fără să inventeze o
+# cadență pe care apoi omul s-ar baza.
+UNITATI_RECURENTA = {
+    16: "day",
+    256: "week",
+    8: "month",
+    4: "year",
+}
+
+
+def decodeaza_recurenta(rule):
+    """Regula brută a lui Things, redusă la unitate + interval."""
+    if not isinstance(rule, dict):
+        return None
+    unitate = UNITATI_RECURENTA.get(rule.get("fu"))
+    interval = rule.get("fa")
+    if not isinstance(interval, int) or interval < 1:
+        interval = 1
+    return {"unit": unitate or "", "interval": interval, "raw": rule.get("fu")}
+
+
+def normalize(task):
+    """Task-ul CLI-ului, redus la ce desenează panoul.
+
+    Panoul primește sute de task-uri prin proprietăți QML; forma completă a
+    CLI-ului (obiecte imbricate pentru start / dates / recurrence / flags /
+    indexes) ar traversa granița aia la fiecare reîmprospătare fără ca nimic
+    să o citească. Plată și scurtă, se copiază ieftin.
+    """
+    start = task.get("start") or {}
+    dates = task.get("dates") or {}
+    rec = task.get("recurrence") or {}
+    idx = task.get("indexes") or {}
+
+    checklist = []
+    for item in task.get("checklist") or []:
+        checklist.append({
+            "id": item.get("id") or "",
+            "sid": item.get("short_id") or "",
+            "title": item.get("title") or "",
+            "status": item.get("status") or "incomplete",
+            "done": item.get("status") == "completed",
+            "index": item.get("index") or 0,
+        })
+    checklist.sort(key=lambda c: c["index"])
+
+    return {
+        "id": task.get("id") or "",
+        "sid": task.get("short_id") or "",
+        "title": task.get("title") or "",
+        "notes": task.get("notes") or "",
+        "status": task.get("status") or "incomplete",
+        "type": task.get("type") or "todo",
+        "bucket": start.get("bucket") or "anytime",
+        # Reper de zi vs. moment real — vezi zi_reper / zi_moment.
+        "when": zi_reper(start.get("scheduled_at")),
+        "evening": bool(start.get("evening")),
+        "deadline": zi_reper(dates.get("deadline_at")),
+        "created": zi_moment(dates.get("created_at")),
+        "modified": zi_moment(dates.get("modified_at")),
+        "completed": zi_moment(dates.get("completed_at")),
+        "project": ref(task.get("project")),
+        "area": ref(task.get("area")),
+        "heading": ref(task.get("heading")),
+        "tags": [t.get("title") or "" for t in (task.get("tags") or []) if isinstance(t, dict)],
+        "checklist": checklist,
+        "recurring": bool(rec.get("is_instance") or rec.get("is_template")),
+        "template": bool(rec.get("is_template")),
+        # Instanța nu-și poartă regula, doar id-ul șablonului care a produs-o;
+        # regula se lipește mai jos, după ce toate task-urile sunt citite.
+        "templateId": (rec.get("template_ids") or [None])[0],
+        "repeat": decodeaza_recurenta(rec.get("rule")),
+        "trashed": bool((task.get("flags") or {}).get("trashed")),
+        "sort": idx.get("sort_index") or 0,
+        "todaySort": idx.get("today_sort_index") or 0,
+    }
+
+
+def ids_of(rows):
+    out = []
+    for row in rows or []:
+        ident = row.get("id")
+        if ident:
+            out.append(ident)
+    return out
+
+
+# ----------------------------------------------------------------- snapshot
+
+VIEWS = [
+    ("today", ["today"]),
+    ("upcoming", ["upcoming"]),
+    ("anytime", ["anytime"]),
+    ("someday", ["someday"]),
+    ("inbox", ["inbox"]),
+]
+
+
+def snapshot(do_sync=True, logbook_days=14):
+    today = date.today()
+    out = {
+        "ok": True,
+        "error": "",
+        "errorKind": "",
+        "syncError": "",
+        "at": int(datetime.now().timestamp()),
+        "today": today.isoformat(),
+        "tasks": {},
+        "views": {},
+        "projects": [],
+        "areas": [],
+        "tags": [],
+        "counts": {},
+    }
+
+    # Un singur sync, și numai el are voie să pice fără să strice tot: o rețea
+    # căzută înseamnă date vechi, nu panou gol.
+    if do_sync:
+        try:
+            run(["today", "--json"], SYNC_TIMEOUT, sync=True)
+        except CliError as exc:
+            if exc.kind in ("missing", "auth"):
+                out["ok"] = False
+                out["error"] = exc.message
+                out["errorKind"] = exc.kind
+                return out
+            out["syncError"] = exc.message
+
+    try:
+        # Tot detaliul, dintr-un singur apel. `find --any-status` întoarce și
+        # proiectele (type == "project"), deci progresul lor se calculează de
+        # aici, fără un apel pe proiect.
+        everything = run_json(["find", "--any-status", "--json"], READ_TIMEOUT, default=[])
+
+        for raw in everything:
+            task = normalize(raw)
+            if task["id"] and not task["trashed"]:
+                out["tasks"][task["id"]] = task
+
+        # Fiecare instanță împrumută regula șablonului ei. Fără pasul ăsta,
+        # un task recurent din „Azi" ar ști doar că se repetă, nu și cât de des.
+        reguli = {}
+        for task in out["tasks"].values():
+            if task["template"] and task["repeat"]:
+                reguli[task["id"]] = task["repeat"]
+        for task in out["tasks"].values():
+            if not task["repeat"] and task["templateId"]:
+                task["repeat"] = reguli.get(task["templateId"])
+
+        for name, args in VIEWS:
+            out["views"][name] = ids_of(run_json(args + ["--json"], READ_TIMEOUT, default=[]))
+
+        # Logbook-ul e nemărginit; panoul arată o fereastră recentă, iar
+        # „terminate azi" se numără din ea.
+        since = date.fromordinal(today.toordinal() - max(0, logbook_days))
+        logbook = run_json(
+            ["logbook", "--from", since.isoformat(), "--json"], READ_TIMEOUT, default=[]
+        )
+        for raw in logbook:
+            task = normalize(raw)
+            # Logbook-ul e singura sursă pentru task-uri care nu mai apar în
+            # `find` (nu e cazul azi, dar nici nu costă să fim compleți).
+            if task["id"] and not task["trashed"]:
+                out["tasks"].setdefault(task["id"], task)
+        out["views"]["logbook"] = ids_of(logbook)
+
+        projects = run_json(["projects", "list", "--json"], READ_TIMEOUT, default=[])
+        areas = run_json(["areas", "list", "--json"], READ_TIMEOUT, default=[])
+        tags = run_json(["tags", "list", "--json"], READ_TIMEOUT, default=[])
+    except CliError as exc:
+        out["ok"] = False
+        out["error"] = exc.message
+        out["errorKind"] = exc.kind
+        return out
+
+    # Progresul pe proiect: câte task-uri deschise din câte cu totul. Se
+    # numără din dump-ul complet, nu cu un apel pe proiect.
+    open_by_project = {}
+    total_by_project = {}
+    for task in out["tasks"].values():
+        if task["type"] != "todo":
+            continue
+        holder = task["project"]["id"] if task["project"] else None
+        if not holder:
+            continue
+        total_by_project[holder] = total_by_project.get(holder, 0) + 1
+        if task["status"] == "incomplete":
+            open_by_project[holder] = open_by_project.get(holder, 0) + 1
+
+    for raw in projects:
+        proj = normalize(raw)
+        pid = proj["id"]
+        out["projects"].append({
+            "id": pid,
+            "sid": proj["sid"],
+            "title": proj["title"],
+            "notes": proj["notes"],
+            "area": proj["area"],
+            "tags": proj["tags"],
+            "when": proj["when"],
+            "bucket": proj["bucket"],
+            "deadline": proj["deadline"],
+            "open": open_by_project.get(pid, 0),
+            "total": total_by_project.get(pid, 0),
+            "sort": proj["sort"],
+        })
+
+    for raw in areas:
+        out["areas"].append({
+            "id": raw.get("id") or "",
+            "sid": raw.get("short_id") or "",
+            "title": raw.get("title") or "",
+        })
+
+    for raw in tags:
+        out["tags"].append({
+            "id": raw.get("id") or "",
+            "sid": raw.get("short_id") or "",
+            "title": raw.get("title") or "",
+        })
+
+    stamp = today.isoformat()
+    counts = {name: len(ids) for name, ids in out["views"].items()}
+    counts["projects"] = len(out["projects"])
+    counts["doneToday"] = sum(
+        1 for tid in out["views"].get("logbook", [])
+        if (out["tasks"].get(tid) or {}).get("completed") == stamp
+    )
+    counts["overdue"] = sum(
+        1 for task in out["tasks"].values()
+        if task["status"] == "incomplete" and task["deadline"] and task["deadline"] < stamp
+    )
+    out["counts"] = counts
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Instantaneu Things 3 pentru bara Omarchy")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="citește doar cache-ul local, fără sincronizare cu norul")
+    parser.add_argument("--logbook-days", type=int, default=14,
+                        help="câte zile de logbook intră în instantaneu (implicit 14)")
+    args = parser.parse_args()
+
+    try:
+        data = snapshot(do_sync=not args.no_sync, logbook_days=args.logbook_days)
+    except Exception as exc:  # noqa: BLE001 — nimic nu are voie să iasă fără JSON
+        data = {
+            "ok": False,
+            "error": str(exc) or exc.__class__.__name__,
+            "errorKind": "internal",
+            "at": int(datetime.now().timestamp()),
+            "tasks": {}, "views": {}, "projects": [], "areas": [], "tags": [], "counts": {},
+        }
+
+    json.dump(data, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
