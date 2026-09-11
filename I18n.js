@@ -263,6 +263,7 @@ var TEXTE = {
     "error.sync": "Sync failed — showing cached data",
     "error.generic": "things3 failed: {detail}",
     "error.action": "Action failed: {detail}",
+    "error.oversize": "things3 sent too much data — snapshot dropped",
     "help.title": "Keyboard",
     "help.move": "↑ ↓ move · Enter complete",
     "help.views": "Shift+Tab cycles views · 1…7 jump",
@@ -365,6 +366,7 @@ var TEXTE = {
     "error.sync": "Sincronizarea a eșuat — se arată datele din cache",
     "error.generic": "things3 a eșuat: {detail}",
     "error.action": "Acțiunea a eșuat: {detail}",
+    "error.oversize": "things3 a trimis prea multe date — instantaneul a fost aruncat",
     "help.title": "Taste",
     "help.move": "↑ ↓ mută · Enter bifează",
     "help.views": "Shift+Tab schimbă vederea · 1…7 sar direct",
@@ -467,6 +469,7 @@ var TEXTE = {
     "error.sync": "Synchronisierung fehlgeschlagen — zeigt zwischengespeicherte Daten",
     "error.generic": "things3 fehlgeschlagen: {detail}",
     "error.action": "Aktion fehlgeschlagen: {detail}",
+    "error.oversize": "things3 hat zu viele Daten gesendet — Snapshot verworfen",
     "help.title": "Tastatur",
     "help.move": "↑ ↓ bewegen · Enter erledigen",
     "help.views": "Shift+Tab wechselt Ansichten · 1…7 springen",
@@ -569,6 +572,7 @@ var TEXTE = {
     "error.sync": "Échec de la synchronisation — données en cache",
     "error.generic": "échec de things3 : {detail}",
     "error.action": "Échec de l’action : {detail}",
+    "error.oversize": "things3 a envoyé trop de données — instantané abandonné",
     "help.title": "Clavier",
     "help.move": "↑ ↓ déplacer · Entrée terminer",
     "help.views": "Maj+Tab change de vue · 1…7 accès direct",
@@ -671,6 +675,7 @@ var TEXTE = {
     "error.sync": "Fallo al sincronizar — mostrando datos en caché",
     "error.generic": "things3 falló: {detail}",
     "error.action": "La acción falló: {detail}",
+    "error.oversize": "things3 envió demasiados datos — instantánea descartada",
     "help.title": "Teclado",
     "help.move": "↑ ↓ mover · Intro completar",
     "help.views": "Mayús+Tab cambia de vista · 1…7 acceso directo",
@@ -773,6 +778,7 @@ var TEXTE = {
     "error.sync": "Sincronizzazione fallita — dati dalla cache",
     "error.generic": "things3 non è riuscito: {detail}",
     "error.action": "Azione fallita: {detail}",
+    "error.oversize": "things3 ha inviato troppi dati — istantanea scartata",
     "help.title": "Tastiera",
     "help.move": "↑ ↓ muovi · Invio completa",
     "help.views": "Maiusc+Tab cambia vista · 1…7 vai",
@@ -875,6 +881,7 @@ var TEXTE = {
     "error.sync": "Falha ao sincronizar — mostrando dados em cache",
     "error.generic": "things3 falhou: {detail}",
     "error.action": "A ação falhou: {detail}",
+    "error.oversize": "o things3 enviou dados demais — instantâneo descartado",
     "help.title": "Teclado",
     "help.move": "↑ ↓ mover · Enter concluir",
     "help.views": "Shift+Tab troca de visão · 1…7 ir direto",
@@ -977,6 +984,7 @@ var TEXTE = {
     "error.sync": "Synchronizacja nie powiodła się — dane z pamięci podręcznej",
     "error.generic": "things3 zawiodło: {detail}",
     "error.action": "Akcja nie powiodła się: {detail}",
+    "error.oversize": "things3 wysłał za dużo danych — zrzut odrzucony",
     "help.title": "Klawiatura",
     "help.move": "↑ ↓ ruch · Enter ukończ",
     "help.views": "Shift+Tab zmienia widok · 1…7 skok",
@@ -1079,6 +1087,7 @@ var TEXTE = {
     "error.sync": "Сбой синхронизации — показаны данные из кэша",
     "error.generic": "things3 завершился с ошибкой: {detail}",
     "error.action": "Действие не выполнено: {detail}",
+    "error.oversize": "things3 прислал слишком много данных — снимок отброшен",
     "help.title": "Клавиатура",
     "help.move": "↑ ↓ перемещение · Enter завершить",
     "help.views": "Shift+Tab меняет вид · 1…7 переход",
@@ -1181,6 +1190,7 @@ var TEXTE = {
     "error.sync": "同步失败 — 显示缓存数据",
     "error.generic": "things3 失败：{detail}",
     "error.action": "操作失败：{detail}",
+    "error.oversize": "things3 输出数据过多，已丢弃本次快照",
     "help.title": "键盘",
     "help.move": "↑ ↓ 移动 · 回车 完成",
     "help.views": "Shift+Tab 切换视图 · 1…7 直达",
@@ -1384,6 +1394,11 @@ function textEroare(cod, fel, detaliu) {
   }
   if (fel === "auth") {
     return t(cod, "error.auth")
+  }
+  // Tăierea la plafon are un mesaj al ei: detaliul din helper spune câți
+  // octeți, ceea ce nu ajută pe nimeni care se uită la bară.
+  if (fel === "oversize") {
+    return t(cod, "error.oversize")
   }
   return t(cod, "error.generic", { detail: String(detaliu || fel || "?") })
 }

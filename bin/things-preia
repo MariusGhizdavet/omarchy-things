@@ -33,8 +33,10 @@ import calendar
 import json
 import re
 import os
+import selectors
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 
 CLI = "things3"
@@ -45,6 +47,25 @@ CLI = "things3"
 SYNC_TIMEOUT = 25
 READ_TIMEOUT = 10
 
+# Cât are voie să scrie un `things3`, și cât au voie toate la un loc.
+#
+# Ieșirea CLI-ului nu e de încredere doar fiindcă vine de pe disc: un jurnal
+# Things corupt, un `find` intrat în buclă sau un binar `things3` înlocuit pot
+# scoate oricâți octeți — iar instantaneul îi ține pe toți în memorie de trei
+# ori: o dată aici, o dată în JSON-ul parsat, o dată în colectorul din QML.
+# Deci se taie în două locuri. Fiecare proces are plafonul lui, ca unul singur
+# scăpat de sub control să nu ducă nicăieri; și toate au împreună un buget, ca
+# zece răspunsuri fiecare cuminte să nu se adune peste ce încape. Un
+# instantaneu real, cu mii de task-uri, stă sub un megaoctet.
+MAX_OCTETI_PROCES = 8 * 1024 * 1024
+MAX_OCTETI_INSTANTANEU = 32 * 1024 * 1024
+# Din stderr ne trebuie doar primul rând, pentru mesaj.
+MAX_OCTETI_STDERR = 64 * 1024
+# Și ce scriem noi are plafon: peste el, panoul primește o eroare scurtă, nu
+# un șir care i-ar umple colectorul.
+MAX_OCTETI_IESIRE = 16 * 1024 * 1024
+BUCATA = 64 * 1024
+
 
 class CliError(Exception):
     def __init__(self, kind, message):
@@ -53,38 +74,139 @@ class CliError(Exception):
         self.message = message
 
 
-def run(args, timeout, sync=False):
+class Buget:
+    """Octeții pe care îi mai are de cheltuit un instantaneu, cu totul.
+
+    Trăiește cât o compunere de instantaneu și trece prin toate apelurile ei,
+    ca al zecelea `things3` să știe cât au lăsat primele nouă.
+    """
+
+    def __init__(self, total=MAX_OCTETI_INSTANTANEU):
+        self.ramas = max(0, int(total))
+
+    def plafon(self):
+        """Cât are voie să scrie următorul proces: ce-i mai mic dintre plafonul
+        lui și ce-a mai rămas din buget."""
+        return min(MAX_OCTETI_PROCES, self.ramas)
+
+    def scade(self, octeti):
+        self.ramas = max(0, self.ramas - octeti)
+
+
+def _incheie(proc):
+    """Omoară procesul și îi închide țevile — nimic nu rămâne în urmă."""
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    for teava in (proc.stdout, proc.stderr):
+        if teava is not None:
+            try:
+                teava.close()
+            except OSError:
+                pass
+
+
+def _aduna(proc, timeout, plafon, eticheta):
+    """Citește stdout și stderr pe măsură ce vin, cu tăiere la depășire.
+
+    `subprocess.run(capture_output=True)` înghițea orice, oricât: tot ce scria
+    CLI-ul intra în memorie și abia pe urmă se putea vedea cât e — adică prea
+    târziu. Aici se citește în bucăți și se numără pe drum, iar prima bucată
+    care trece de plafon oprește totul: procesul e omorât înainte ca ieșirea
+    lui să ajungă în `json.loads`, și cu atât mai puțin în colectorul din QML.
+
+    Pentru ceas se ține un termen absolut, fiindcă timpul se consumă și între
+    bucăți, nu doar într-o singură așteptare.
+    """
+    iesire = bytearray()
+    erori = bytearray()
+    termen = time.monotonic() + timeout
+
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, iesire)
+    selector.register(proc.stderr, selectors.EVENT_READ, erori)
+    try:
+        while selector.get_map():
+            ramas = termen - time.monotonic()
+            if ramas <= 0:
+                raise CliError("timeout", "things3 %s a depășit timpul" % eticheta)
+            gata = selector.select(timeout=ramas)
+            if not gata:
+                raise CliError("timeout", "things3 %s a depășit timpul" % eticheta)
+            for cheie, _ in gata:
+                bucata = os.read(cheie.fd, BUCATA)
+                if not bucata:
+                    selector.unregister(cheie.fileobj)
+                    continue
+                if cheie.data is iesire:
+                    if len(iesire) + len(bucata) > plafon:
+                        raise CliError(
+                            "oversize",
+                            "things3 %s a scris peste limita de %d octeți"
+                            % (eticheta, plafon),
+                        )
+                    iesire += bucata
+                elif len(erori) < MAX_OCTETI_STDERR:
+                    erori += bucata[:MAX_OCTETI_STDERR - len(erori)]
+    finally:
+        selector.close()
+
+    try:
+        cod = proc.wait(timeout=max(0.0, termen - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        raise CliError("timeout", "things3 %s a depășit timpul" % eticheta)
+    return cod, bytes(iesire), bytes(erori)
+
+
+def run(args, timeout, sync=False, buget=None):
     """Rulează `things3` și întoarce textul de pe stdout.
 
     `--no-sync` e opțiune *globală*, deci stă înaintea subcomenzii — pusă
     după, clap o respinge ca argument necunoscut al subcomenzii.
+
+    Ieșirea se citește în flux și se taie la plafon; fără un buget primit de
+    afară, apelul își face unul al lui, ca nici o rulare singuratică să nu
+    rămână nemărginită.
     """
     argv = [CLI] + ([] if sync else ["--no-sync"]) + list(args)
+    eticheta = " ".join(args[:1])
+    if buget is None:
+        buget = Buget()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             # Fără moștenirea unui stdin de terminal: helperul rulează dintr-un
             # proces grafic și nu are ce citi de la tastatură.
             stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         raise CliError("missing", "things3 nu este instalat")
-    except subprocess.TimeoutExpired:
-        raise CliError("timeout", "things3 %s a depășit timpul" % " ".join(args[:1]))
 
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    try:
+        cod, iesire, erori = _aduna(proc, timeout, buget.plafon(), eticheta)
+    finally:
+        _incheie(proc)
+    buget.scade(len(iesire))
+
+    text = iesire.decode("utf-8", "replace")
+    if cod != 0:
+        err = erori.decode("utf-8", "replace").strip() or text.strip()
         kind = "auth" if "auth" in err.lower() or "credential" in err.lower() else "cli"
         raise CliError(kind, err.splitlines()[0] if err else "things3 a eșuat")
 
-    return proc.stdout or ""
+    return text
 
 
-def run_json(args, timeout, sync=False, default=None):
-    raw = run(args, timeout, sync=sync).strip()
+def run_json(args, timeout, sync=False, default=None, buget=None):
+    raw = run(args, timeout, sync=sync, buget=buget).strip()
     if not raw:
         return default if default is not None else []
     try:
@@ -490,8 +612,26 @@ VIEWS = [
 ]
 
 
+def esec(mesaj, fel):
+    """Instantaneul pe care îl primește panoul când n-avem ce-i da."""
+    return {
+        "ok": False,
+        "error": mesaj,
+        "errorKind": fel,
+        "at": int(datetime.now().timestamp()),
+        "tasks": {}, "views": {}, "projects": [], "areas": [], "tags": [], "counts": {},
+    }
+
+
+def scrie(data):
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
     today = date.today()
+    # Un singur buget pentru toate apelurile din instantaneul ăsta: plafonul
+    # pe proces n-ar opri zece răspunsuri care, fiecare sub el, se adună peste.
+    buget = Buget()
     out = {
         "ok": True,
         "error": "",
@@ -511,7 +651,7 @@ def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
     # căzută înseamnă date vechi, nu panou gol.
     if do_sync:
         try:
-            run(["today", "--json"], SYNC_TIMEOUT, sync=True)
+            run(["today", "--json"], SYNC_TIMEOUT, sync=True, buget=buget)
         except CliError as exc:
             if exc.kind in ("missing", "auth"):
                 out["ok"] = False
@@ -524,7 +664,8 @@ def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
         # Tot detaliul, dintr-un singur apel. `find --any-status` întoarce și
         # proiectele (type == "project"), deci progresul lor se calculează de
         # aici, fără un apel pe proiect.
-        everything = run_json(["find", "--any-status", "--json"], READ_TIMEOUT, default=[])
+        everything = run_json(["find", "--any-status", "--json"], READ_TIMEOUT,
+                              default=[], buget=buget)
 
         for raw in everything:
             task = normalize(raw)
@@ -542,13 +683,15 @@ def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
                 task["repeat"] = reguli.get(task["templateId"])
 
         for name, args in VIEWS:
-            out["views"][name] = ids_of(run_json(args + ["--json"], READ_TIMEOUT, default=[]))
+            out["views"][name] = ids_of(
+                run_json(args + ["--json"], READ_TIMEOUT, default=[], buget=buget))
 
         # Logbook-ul e nemărginit; panoul arată o fereastră recentă, iar
         # „terminate azi" se numără din ea.
         since = date.fromordinal(today.toordinal() - max(0, logbook_days))
         logbook = run_json(
-            ["logbook", "--from", since.isoformat(), "--json"], READ_TIMEOUT, default=[]
+            ["logbook", "--from", since.isoformat(), "--json"], READ_TIMEOUT,
+            default=[], buget=buget
         )
         for raw in logbook:
             task = normalize(raw)
@@ -558,10 +701,17 @@ def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
                 out["tasks"].setdefault(task["id"], task)
         out["views"]["logbook"] = ids_of(logbook)
 
-        projects = run_json(["projects", "list", "--json"], READ_TIMEOUT, default=[])
-        areas = run_json(["areas", "list", "--json"], READ_TIMEOUT, default=[])
-        tags = run_json(["tags", "list", "--json"], READ_TIMEOUT, default=[])
+        projects = run_json(["projects", "list", "--json"], READ_TIMEOUT,
+                            default=[], buget=buget)
+        areas = run_json(["areas", "list", "--json"], READ_TIMEOUT, default=[], buget=buget)
+        tags = run_json(["tags", "list", "--json"], READ_TIMEOUT, default=[], buget=buget)
     except CliError as exc:
+        if exc.kind == "oversize":
+            # Ce s-a strâns până la tăiere e și mare, și de nefolosit: se
+            # aruncă aici, nu se cară până în colectorul panoului.
+            return esec(exc.message, exc.kind)
+        # Restul erorilor merg mai departe *cu* ce-am apucat să citim: un
+        # `things3 tags` picat nu e un motiv să golim lista de azi.
         out["ok"] = False
         out["error"] = exc.message
         out["errorKind"] = exc.kind
@@ -655,16 +805,16 @@ def main():
         data = snapshot(do_sync=not args.no_sync, logbook_days=args.logbook_days,
                         projection_days=args.projection_days)
     except Exception as exc:  # noqa: BLE001 — nimic nu are voie să iasă fără JSON
-        data = {
-            "ok": False,
-            "error": str(exc) or exc.__class__.__name__,
-            "errorKind": "internal",
-            "at": int(datetime.now().timestamp()),
-            "tasks": {}, "views": {}, "projects": [], "areas": [], "tags": [], "counts": {},
-        }
+        data = esec(str(exc) or exc.__class__.__name__, "internal")
 
-    json.dump(data, sys.stdout, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write("\n")
+    brut = scrie(data)
+    if len(brut) > MAX_OCTETI_IESIRE:
+        # Plafoanele de dinainte sunt pe ce *citim*; ăsta e pe ce *scriem*,
+        # ultimul înainte ca textul să treacă în colectorul panoului.
+        brut = scrie(esec("instantaneul Things a ieșit prea mare", "oversize"))
+
+    sys.stdout.buffer.write(brut + b"\n")
+    sys.stdout.buffer.flush()
     return 0
 
 

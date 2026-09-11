@@ -332,11 +332,21 @@ Panel {
 
   // ------------------------------------------------------------- preluarea
 
+  // Cât are voie să adune colectorul dintr-o preluare. Helperul își taie deja
+  // și intrările, și ieșirea, dar colectorul e ultimul loc unde textul stă
+  // întreg în memoria shell-ului — și singurul de care răspundem noi dacă
+  // helperul e înlocuit sau moare la jumătatea unui șir. Un instantaneu real
+  // stă sub un megaoctet; peste plafonul ăsta nu mai e nimic de citit, e o
+  // scurgere.
+  readonly property int plafonPreluare: 16 * 1024 * 1024
+  property bool preluarePreaMare: false
+
   function actualizeaza(cuSincronizare) {
     if (sePreia) {
       return
     }
     sePreia = true
+    preluarePreaMare = false
     var argv = [root.caleHelper, "--logbook-days", String(root.limitaLogbook)]
     if (cuSincronizare === false) {
       argv.push("--no-sync")
@@ -349,13 +359,27 @@ Panel {
     id: preluare
     running: false
     stdout: StdioCollector {
-      waitForEnd: true
+      // Fără `waitForEnd`: cu el, lungimea s-ar afla abia după ce tot textul
+      // a intrat în memorie, adică prea târziu ca să mai însemne ceva.
+      waitForEnd: false
+      onDataChanged: {
+        if (!root.preluarePreaMare && text.length > root.plafonPreluare) {
+          // Oprirea procesului închide țeava, deci scrierea se termină aici;
+          // ce s-a strâns până acum nu mai trece prin JSON.parse.
+          root.preluarePreaMare = true
+          preluare.running = false
+        }
+      }
       onStreamFinished: {
         var brut = null
-        try {
-          brut = JSON.parse(text)
-        } catch (e) {
-          brut = null
+        if (root.preluarePreaMare) {
+          root.instantaneu = Model.normalizeazaInstantaneu({ ok: false, errorKind: "oversize" })
+        } else {
+          try {
+            brut = JSON.parse(text)
+          } catch (e) {
+            brut = null
+          }
         }
         if (brut) {
           root.instantaneu = Model.normalizeazaInstantaneu(brut)
@@ -402,7 +426,17 @@ Panel {
     id: actiune
     running: false
     stderr: StdioCollector {
-      waitForEnd: true
+      // Din stderr ne trebuie primul rând, atât. Plafonul e larg dinadins:
+      // un `things3` care scrie un megaoctet de erori la o scriere e deja
+      // stricat, iar oprirea lui nu ia nimic ce ar fi mers bine — dar un
+      // plafon strâns ar putea tăia o scriere adevărată la jumătate.
+      readonly property int plafon: 1024 * 1024
+      waitForEnd: false
+      onDataChanged: {
+        if (text.length > plafon) {
+          actiune.running = false
+        }
+      }
       onStreamFinished: {
         var mesaj = String(text || "").replace(/^\s+|\s+$/g, "")
         if (mesaj !== "") {

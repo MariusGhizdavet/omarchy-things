@@ -319,6 +319,14 @@ next snapshot, and every action is followed by a real sync — the write does on
 of its own, but that one ends with it, so a change made on the phone meanwhile
 would not arrive and a failed push would not be retried until the next tick.
 
+The snapshot is read under hard byte ceilings. `bin/things-preia` streams each
+`things3` run instead of buffering it whole: one run may write eight megabytes,
+one snapshot thirty-two across all of its runs, and the JSON handed to the panel
+sixteen — a real snapshot, with thousands of tasks, stays under one. Whatever
+crosses a ceiling is killed mid-write and reported as an error rather than
+parsed, and the panel holds its collector to the same rule, so a `things3` stuck
+in a loop cannot grow the shell's memory without bound.
+
 Dates need care in both directions. Things encodes a scheduled day as a
 timestamp, in two different shapes — `--when today` gives midnight UTC, an
 explicit date gives local midnight expressed in UTC — and the CLI builds the
