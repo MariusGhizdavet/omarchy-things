@@ -17,6 +17,115 @@ section headings, cursor rows and edge action buttons as the built-in
 Bluetooth and Network panels — so it looks like the rest of Omarchy rather
 than like a port of the Things UI.
 
+## Install
+
+Things 3 itself only runs on Apple hardware, and this widget is not a
+reimplementation of it. It is a front end for
+[**`things3-cloud`**](https://github.com/evanpurkhiser/things3-cloud) — a
+command-line client, written in Rust, that speaks the same Things Cloud sync
+API the Mac and iPhone apps do. That CLI does the syncing, holds the local
+cache and performs every write; the widget only asks it questions and draws
+the answers. **Without it installed and signed in, the panel has nothing to
+show and will say so.**
+
+You also need Python 3, which Omarchy already has.
+
+### 1. Install the `things3` CLI
+
+It is on the AUR as `things3-cloud`:
+
+```sh
+omarchy pkg aur add things3-cloud
+```
+
+Any AUR helper does the same job — `yay -S things3-cloud`. Check it landed:
+
+```sh
+things3 --version      # things3 0.10.0 or newer
+```
+
+### 2. Sign in to Things Cloud, once
+
+```sh
+things3 set-auth
+```
+
+It prompts for the e-mail address and password of your **Things Cloud**
+account — the same account Things on your Mac or iPhone syncs with. That
+account is created inside the Things apps, so if you have never used Things on
+an Apple device there is nothing on the server yet and nothing for the widget
+to show. The credentials are written to `~/.local/state/things3/auth.json`,
+readable only by you, and the CLI keeps its task cache next to it in
+`~/.local/state/things3/`. Neither the widget nor its helper ever reads or
+touches your password.
+
+### 3. Check it before adding the widget
+
+```sh
+things3 today
+```
+
+If that prints your tasks, the widget will show them. If it prints an
+authentication error, run `set-auth` again; if the command is not found, the
+package is not installed.
+
+### 4. Add the widget
+
+```sh
+omarchy plugin add https://github.com/MariusGhizdavet/omarchy-things --enable
+```
+
+`omarchy plugin add` clones the repo into
+`~/.config/omarchy/plugins/mghizdavet.things/`; without `--enable` it stays
+disabled so you can read the code first, and `omarchy plugin enable
+mghizdavet.things` turns it on afterwards.
+
+Then put it in the bar, if it is not there already:
+
+```sh
+omarchy bar move mghizdavet.things --section right
+```
+
+## Update
+
+```sh
+omarchy plugin update mghizdavet.things
+omarchy-restart-shell
+```
+
+**Both lines.** `omarchy plugin update` fast-forwards the checkout and then calls
+`rescanPlugins`, which does not re-instantiate QML that is already loaded — so
+the update lands on disk, the command says `Updated`, and the panel keeps
+running the old code until the shell restarts. That second line is the whole
+difference between "it did not work" and "it works".
+
+Note that `omarchy update` does **not** cover this: it updates system and AUR
+packages, and never touches `~/.config/omarchy/plugins/`. Plugins are pulled by
+hand, when you ask for them.
+
+If you would rather not remember, `omarchy update` runs
+`omarchy-hook post-update`, so a file at
+`~/.config/omarchy/hooks/post-update.d/plugins` containing the two commands
+above (with `--yes`) ties the two together. The trade-off is real: `--yes` skips
+the diff of the incoming code, which for third-party plugins is the step worth
+keeping.
+
+## Remove
+
+```sh
+omarchy plugin remove mghizdavet.things
+```
+
+That deletes `~/.config/omarchy/plugins/mghizdavet.things/`. The widget keeps
+no state of its own outside that directory — everything it shows lives in
+Things Cloud and in the CLI's own cache — so nothing else is left behind.
+To remove the CLI as well:
+
+```sh
+omarchy pkg drop things3-cloud
+rm -rf ~/.local/state/things3      # cached tasks and your saved credentials
+```
+
 ## Features
 
 - **Seven views plus search.** The selected tab shows its name, the rest stay
@@ -134,124 +243,6 @@ four units, the other three were pinned by the data, and the remaining one was
 confirmed with the author of the task. Any `fu` outside the table is shown as
 a plain "repeats" rather than guessed at.
 
-## Requirements: the `things3` sync CLI
-
-Things 3 itself only runs on Apple hardware, and this widget is not a
-reimplementation of it. It is a front end for
-[**`things3-cloud`**](https://github.com/evanpurkhiser/things3-cloud) — a
-command-line client, written in Rust, that speaks the same Things Cloud sync
-API the Mac and iPhone apps do. That CLI does the syncing, holds the local
-cache and performs every write; the widget only asks it questions and draws
-the answers. **Without it installed and signed in, the panel has nothing to
-show and will say so.**
-
-You also need Python 3, which Omarchy already has.
-
-### 1. Install the CLI
-
-It is on the AUR as `things3-cloud`:
-
-```sh
-omarchy pkg aur add things3-cloud
-```
-
-Any AUR helper does the same job — `yay -S things3-cloud`. Check it landed:
-
-```sh
-things3 --version      # things3 0.10.0 or newer
-```
-
-### 2. Sign in to Things Cloud, once
-
-```sh
-things3 set-auth
-```
-
-It prompts for the e-mail address and password of your **Things Cloud**
-account — the same account Things on your Mac or iPhone syncs with. That
-account is created inside the Things apps, so if you have never used Things on
-an Apple device there is nothing on the server yet and nothing for the widget
-to show. The credentials are written to `~/.local/state/things3/auth.json`,
-readable only by you, and the CLI keeps its task cache next to it in
-`~/.local/state/things3/`. Neither the widget nor its helper ever reads or
-touches your password.
-
-### 3. Check it before adding the widget
-
-```sh
-things3 today
-```
-
-If that prints your tasks, the widget will show them. If it prints an
-authentication error, run `set-auth` again; if the command is not found, the
-package is not installed.
-
-### How the widget uses it
-
-Every refresh is **one** Things Cloud sync (`things3` syncs on each run, about
-700 ms), and every one of the eight views is then read from the local cache
-with `things3 --no-sync` (about 4 ms). Hence the two refresh intervals in the
-settings — five minutes on mains power, fifteen on battery by default, since a
-sync wakes the radio. `r` in the panel, or a right-click on the bar pill, syncs
-immediately.
-
-## Install
-
-```sh
-omarchy plugin add https://github.com/MariusGhizdavet/omarchy-things --enable
-```
-
-`omarchy plugin add` clones the repo into
-`~/.config/omarchy/plugins/mghizdavet.things/`; without `--enable` it stays
-disabled so you can read the code first, and `omarchy plugin enable
-mghizdavet.things` turns it on afterwards.
-
-Then put it in the bar, if it is not there already:
-
-```sh
-omarchy bar move mghizdavet.things --section right
-```
-
-## Update
-
-```sh
-omarchy plugin update mghizdavet.things
-omarchy-restart-shell
-```
-
-**Both lines.** `omarchy plugin update` fast-forwards the checkout and then calls
-`rescanPlugins`, which does not re-instantiate QML that is already loaded — so
-the update lands on disk, the command says `Updated`, and the panel keeps
-running the old code until the shell restarts. That second line is the whole
-difference between "it did not work" and "it works".
-
-Note that `omarchy update` does **not** cover this: it updates system and AUR
-packages, and never touches `~/.config/omarchy/plugins/`. Plugins are pulled by
-hand, when you ask for them.
-
-If you would rather not remember, `omarchy update` runs
-`omarchy-hook post-update`, so a file at
-`~/.config/omarchy/hooks/post-update.d/plugins` containing the two commands
-above (with `--yes`) ties the two together. The trade-off is real: `--yes` skips
-the diff of the incoming code, which for third-party plugins is the step worth
-keeping.
-
-## Remove
-
-```sh
-omarchy plugin remove mghizdavet.things
-```
-
-That deletes `~/.config/omarchy/plugins/mghizdavet.things/`. The widget keeps
-no state of its own outside that directory — everything it shows lives in
-Things Cloud and in the CLI's own cache — so nothing else is left behind.
-To remove the CLI as well:
-
-```sh
-omarchy pkg drop things3-cloud
-rm -rf ~/.local/state/things3      # cached tasks and your saved credentials
-```
-
 ## Keyboard
 
 | Key | Does |
@@ -310,6 +301,10 @@ the projects with their progress, the areas and the tags. View membership comes
 from the CLI's own `today` / `upcoming` / … commands rather than being
 recomputed here, because "Today" also means overdue, evening and recurring
 instances, and a second implementation of that rule would drift.
+
+That cost is why there are two refresh intervals in the settings — five
+minutes on mains power, fifteen on battery by default, since a sync wakes the
+radio. `r` in the panel, or a right-click on the bar pill, syncs immediately.
 
 Writes go straight to `things3` with the arguments passed as a vector, never
 through a shell, so a task title containing quotes, `$` or `;` is only ever
