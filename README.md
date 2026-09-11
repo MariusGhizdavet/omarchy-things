@@ -212,6 +212,30 @@ Then put it in the bar, if it is not there already:
 omarchy bar move mghizdavet.things --section right
 ```
 
+## Update
+
+```sh
+omarchy plugin update mghizdavet.things
+omarchy-restart-shell
+```
+
+**Both lines.** `omarchy plugin update` fast-forwards the checkout and then calls
+`rescanPlugins`, which does not re-instantiate QML that is already loaded — so
+the update lands on disk, the command says `Updated`, and the panel keeps
+running the old code until the shell restarts. That second line is the whole
+difference between "it did not work" and "it works".
+
+Note that `omarchy update` does **not** cover this: it updates system and AUR
+packages, and never touches `~/.config/omarchy/plugins/`. Plugins are pulled by
+hand, when you ask for them.
+
+If you would rather not remember, `omarchy update` runs
+`omarchy-hook post-update`, so a file at
+`~/.config/omarchy/hooks/post-update.d/plugins` containing the two commands
+above (with `--yes`) ties the two together. The trade-off is real: `--yes` skips
+the diff of the incoming code, which for third-party plugins is the step worth
+keeping.
+
 ## Remove
 
 ```sh
