@@ -97,6 +97,32 @@ Things Cloud records to work around this would mean hand-rolling their sync
 format against a live task database, which is not a risk worth taking for a
 bar widget.
 
+### Future occurrences in Upcoming
+
+A repeating task exists in Things as a hidden *template* plus the *instances*
+materialised from it — and Things only materialises an instance around the day
+it is due. The CLI never puts a template in a view, so until this was handled,
+Upcoming showed nothing recurring at all: the next Wednesday's task simply did
+not exist yet as an object anyone could list.
+
+The panel now computes those occurrences itself and shows them as **projected
+rows** — dimmed, with the cadence spelled out, grouped under their day next to
+the real tasks. The anchor is the last instance that was actually materialised,
+not the rule's own start field, because a template can carry a start date of
+the Unix epoch while its instances land on perfectly sensible days; only when a
+template has produced nothing yet does the rule's anchor get used. Months and
+years step from the anchor by index rather than from the previous occurrence,
+so a "monthly, on the 31st" does not slide permanently onto the 28th after its
+first February.
+
+A projected row cannot be checked off, rescheduled, renamed or deleted: it has
+no id the CLI would accept, so it carries no action buttons, and its tooltip
+says why. It disappears on its own the day Things materialises the real
+instance, which then takes its place. Projections are also kept out of search
+and out of the project view, where six copies of the same weekly task would be
+noise rather than information. The horizon is a year and six occurrences per
+template; `bin/things-preia --projection-days 0` turns them off.
+
 The units are decoded from rules checked against the days their own
 instances actually landed on: daily (`fu=16`), weekly (`fu=256`) and monthly
 (`fu=8`). Yearly (`fu=4`) could not be checked the same way — a yearly task

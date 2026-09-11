@@ -274,7 +274,9 @@ Panel {
       return 0
     }
     if (r.kind === "task") {
-      return 4
+      // Ocurențele proiectate n-au un id pe care CLI-ul să-l accepte, deci
+      // n-au nici butoane — cursorul orizontal nu are unde să meargă.
+      return r.task && r.task.projected ? 0 : 4
     }
     if (r.kind === "check") {
       return 0
@@ -431,7 +433,7 @@ Panel {
   // ------------------------------------------------------------------ acțiuni
 
   function marcheaza(task, gata) {
-    if (!task) {
+    if (!task || task.projected) {
       return
     }
     var local = {}
@@ -458,7 +460,7 @@ Panel {
   }
 
   function stergeTask(task) {
-    if (!task) {
+    if (!task || task.projected) {
       return
     }
     var noi = {}
@@ -634,7 +636,7 @@ Panel {
   }
 
   function deschideFoaia(nume) {
-    if (!taskSelectat) {
+    if (!taskSelectat || taskSelectat.projected) {
       return
     }
     tintaFoaie = taskSelectat.id
@@ -669,6 +671,9 @@ Panel {
   }
 
   function declanseazaActiunea(task, index) {
+    if (!task || task.projected) {
+      return
+    }
     if (index === 0) {
       tintaFoaie = task.id
       mod = "when"
@@ -686,7 +691,7 @@ Panel {
   property var taskDeSters: null
 
   function cereStergerea(task) {
-    if (!task) {
+    if (!task || task.projected) {
       return
     }
     if (!confirmaStergerea) {
@@ -1638,6 +1643,9 @@ Panel {
 
       readonly property var task: linie ? linie.task : null
       readonly property bool bifat: task && task.status !== "incomplete"
+      // O ocurență calculată din regulă, nu un task pe care îl are Things:
+      // se vede, dar nu se atinge.
+      readonly property bool proiectat: task && task.projected === true
       readonly property bool selectat: root.cursorActiv && root.randCurent === indexRand
       readonly property bool areChecklist: task && (task.checklist || []).length > 0
       readonly property bool desfasurat: task && root.desfasurate[task.id] === true
@@ -1660,7 +1668,7 @@ Panel {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        cursorShape: Qt.PointingHandCursor
+        cursorShape: rand.proiectat ? Qt.ArrowCursor : Qt.PointingHandCursor
 
         onContainsMouseChanged: if (containsMouse) {
           root.cursorActiv = true
@@ -1685,6 +1693,9 @@ Panel {
         anchors.leftMargin: Style.space(8) + (rand.linie ? rand.linie.depth * Style.space(16) : 0)
         anchors.rightMargin: Style.space(8)
         implicitHeight: Math.max(bifa.implicitHeight, infoRand.implicitHeight, actiuni.implicitHeight)
+        // O ocurență care încă nu există se citește ca o umbră a rândului
+        // care va veni în ziua ei.
+        opacity: rand.proiectat ? 0.5 : 1.0
 
         Text {
           id: bifa
@@ -1816,7 +1827,7 @@ Panel {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(2)
-          visible: mouseRand.containsMouse || rand.selectat
+          visible: (mouseRand.containsMouse || rand.selectat) && !rand.proiectat
 
           ActiuneRand {
             iconText: "󰃭"
@@ -1864,9 +1875,11 @@ Panel {
 
       PanelToolTip {
         visible: mouseRand.containsMouse && root.indexActiune < 0 && rand.task !== null
-        text: rand.bifat
-          ? I18n.t(root.limba, "action.uncheck")
-          : I18n.t(root.limba, "action.check")
+        text: rand.proiectat
+          ? I18n.t(root.limba, "task.projected")
+          : (rand.bifat
+            ? I18n.t(root.limba, "action.uncheck")
+            : I18n.t(root.limba, "action.check"))
         fontFamily: root.fontulBarei
       }
     }

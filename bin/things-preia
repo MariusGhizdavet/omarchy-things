@@ -29,6 +29,7 @@ lor cititor e panoul.
 """
 
 import argparse
+import calendar
 import json
 import re
 import os
@@ -227,6 +228,180 @@ def decodeaza_recurenta(rule):
     return {"unit": unitate or "", "interval": interval, "raw": rule.get("fu")}
 
 
+# Things nu scrie „fără termen" ca null, ci ca o dată imposibil de atins:
+# `4001-01-01`. Netradusă, santinela ar ieși în panou ca o insignă de termen
+# în anul 4001 — se vede doar pe șabloanele recurente, fiindcă numai ele
+# ajung aici cu câmpul pus.
+ANUL_FARA_TERMEN = 4000
+
+
+def termen(stamp):
+    zi = zi_reper(stamp)
+    if zi and zi[:4].isdigit() and int(zi[:4]) >= ANUL_FARA_TERMEN:
+        return None
+    return zi
+
+
+# ------------------------------------------------------- ocurențe proiectate
+#
+# Un task recurent din Things e două lucruri: un *șablon* (invizibil, fără dată,
+# purtătorul regulii) și *instanțele* materializate din el. CLI-ul nu pune
+# șabloanele în nicio vedere, iar instanțele apar abia în preajma zilei lor —
+# așa că „Upcoming" nu arăta nimic recurent, deși regula e cunoscută.
+#
+# Aici se calculează ocurențele următoare din regulă și se adaugă în Upcoming
+# ca rânduri *proiectate*: se văd, dar nu se pot bifa ori edita, fiindcă până
+# nu le materializează Things n-au un id pe care CLI-ul să-l accepte.
+#
+# Ancora nu e `rule.ia` (pe un șablon îl găsești și cu ia = epoca zero), ci
+# ultima instanță materializată — data care s-a verificat deja pe teren. Se
+# cade pe `ia`, apoi pe `sr`, doar pentru șabloanele care n-au produs încă nimic.
+
+ORIZONT_PROIECTII = 365
+PROIECTII_PE_SABLON = 6
+
+# Câți pași are voie să facă generatorul până să iasă din trecut. Un șablon
+# zilnic abandonat acum trei ani are nevoie de ~1100; peste zece mii nu mai e
+# o recurență, e o regulă stricată, și e mai bine să renunțăm decât să rotim.
+PASI_MAXIMI = 10000
+
+
+def _epoca_zi(secunde):
+    """Un timestamp din regulă ca dată, sau None dacă e evident o umplutură.
+
+    Things scrie în `ia` epoca zero pentru regulile care n-au ancoră reală, iar
+    în `sr` chiar și anul 1; nici una nu e o zi din care să pornești.
+    """
+    if not isinstance(secunde, (int, float)) or secunde <= 0:
+        return None
+    try:
+        zi = datetime.fromtimestamp(secunde, timezone.utc).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    if zi.year < 1990 or zi.year >= ANUL_FARA_TERMEN:
+        return None
+    return zi
+
+
+def zi_din_iso(text):
+    """„YYYY-MM-DD" înapoi ca dată — drumul invers al lui zi_reper."""
+    try:
+        an, luna, zi = (int(x) for x in str(text).split("-"))
+        return date(an, luna, zi)
+    except (TypeError, ValueError):
+        return None
+
+
+def _adauga_luni(zi, luni):
+    """Aceeași zi a lunii, `luni` luni mai încolo, ciuntită la lunile scurte."""
+    total = zi.year * 12 + (zi.month - 1) + luni
+    an, luna = divmod(total, 12)
+    return date(an, luna + 1, min(zi.day, calendar.monthrange(an, luna + 1)[1]))
+
+
+def _pas(ancora, unitate, interval, k):
+    """A k-a ocurență după ancoră.
+
+    Se numără *din ancoră*, nu din ocurența precedentă: altfel un „lunar, pe 31"
+    ar aluneca definitiv pe 28 după prima trecere prin februarie.
+    """
+    if unitate == "day":
+        return ancora + timedelta(days=interval * k)
+    if unitate == "week":
+        return ancora + timedelta(days=7 * interval * k)
+    if unitate == "month":
+        return _adauga_luni(ancora, interval * k)
+    if unitate == "year":
+        return _adauga_luni(ancora, 12 * interval * k)
+    return None
+
+
+def proiecteaza(tasks, azi, orizont=ORIZONT_PROIECTII, maxim=PROIECTII_PE_SABLON):
+    """Ocurențele viitoare ale șabloanelor recurente, ca task-uri proiectate."""
+    sabloane = {t["id"]: t for t in tasks.values()
+                if t["template"] and not t["trashed"] and t["repeat"]}
+    if not sabloane:
+        return []
+
+    # Zilele deja materializate, ca să nu dublăm o instanță pe care Things a
+    # creat-o între timp, și ultima dintre ele, care devine ancoră.
+    ocupate = {}
+    ultima = {}
+    for task in tasks.values():
+        parinte = task["templateId"]
+        if not parinte or parinte not in sabloane or not task["when"]:
+            continue
+        ocupate.setdefault(parinte, set()).add(task["when"])
+        if task["when"] > ultima.get(parinte, ""):
+            ultima[parinte] = task["when"]
+
+    stamp = azi.isoformat()
+    limita = date.fromordinal(azi.toordinal() + orizont)
+    proiectii = []
+
+    for ident, sablon in sabloane.items():
+        regula = sablon["repeat"] or {}
+        unitate = regula.get("unit") or ""
+        interval = regula.get("interval") or 1
+        if unitate not in ("day", "week", "month", "year"):
+            continue
+
+        brut = (sablon.get("_rule") or {})
+        ancora = None
+        if ident in ultima:
+            ancora = zi_din_iso(ultima[ident])
+        if ancora is None:
+            ancora = _epoca_zi(brut.get("ia")) or _epoca_zi(brut.get("sr"))
+        if ancora is None:
+            continue
+
+        zile = ocupate.get(ident, set())
+        gasite = 0
+        for k in range(0, PASI_MAXIMI + 1):
+            zi = _pas(ancora, unitate, interval, k)
+            if zi is None or zi > limita:
+                break
+            iso = zi.isoformat()
+            # Azi și trecutul sunt treaba CLI-ului: ce e materializat stă deja
+            # în „Today", iar ce nu e materializat n-a fost niciodată datorat.
+            if iso <= stamp or iso in zile:
+                continue
+            proiectii.append(ocurenta(sablon, iso))
+            gasite += 1
+            if gasite >= maxim:
+                break
+
+    proiectii.sort(key=lambda t: (t["when"], t["title"]))
+    return proiectii
+
+
+def ocurenta(sablon, iso):
+    """Șablonul, copiat ca task-ul pe care Things îl va crea în ziua aceea."""
+    task = dict(sablon)
+    # Id-ul nu e al unui obiect din Things, deci nu trebuie să semene cu unul:
+    # prefixul îl ține departe de orice comandă a CLI-ului, iar panoul îl
+    # folosește doar ca să deosebească rândurile între ele.
+    task["id"] = "projected:%s:%s" % (sablon["id"], iso)
+    task["sid"] = ""
+    task["when"] = iso
+    task["bucket"] = "scheduled"
+    task["status"] = "incomplete"
+    task["template"] = False
+    task["templateId"] = sablon["id"]
+    task["recurring"] = True
+    task["projected"] = True
+    task["completed"] = None
+    # Termenul unui șablon e o dată fixă; copiat pe fiecare ocurență, ar pune
+    # același deadline (de obicei deja trecut) pe toate. Things îl recalculează
+    # la materializare, deci aici e mai cinstit să lipsească.
+    task["deadline"] = None
+    # Checklist-ul șablonului se copiază în instanță abia la materializare, cu
+    # id-uri noi; arătat aici, ar fi o listă pe care n-o poate bifa nimeni.
+    task["checklist"] = []
+    task.pop("_rule", None)
+    return task
+
+
 def normalize(task):
     """Task-ul CLI-ului, redus la ce desenează panoul.
 
@@ -263,7 +438,7 @@ def normalize(task):
         # Reper de zi vs. moment real — vezi zi_reper / zi_moment.
         "when": zi_reper(start.get("scheduled_at")),
         "evening": bool(start.get("evening")),
-        "deadline": zi_reper(dates.get("deadline_at")),
+        "deadline": termen(dates.get("deadline_at")),
         "created": zi_moment(dates.get("created_at")),
         "modified": zi_moment(dates.get("modified_at")),
         "completed": zi_moment(dates.get("completed_at")),
@@ -278,6 +453,14 @@ def normalize(task):
         # regula se lipește mai jos, după ce toate task-urile sunt citite.
         "templateId": (rec.get("template_ids") or [None])[0],
         "repeat": decodeaza_recurenta(rec.get("rule")),
+        # Adevărat doar pentru rândurile calculate de proiecteaza(); un task
+        # venit de la CLI e întotdeauna real și acționabil.
+        "projected": False,
+        # Regula brută, păstrată doar pe șabloane și doar până se calculează
+        # proiecțiile: `ia` / `sr` sunt ancorele de rezervă ale unui șablon
+        # care n-a produs încă nicio instanță. Se scoate înainte de ieșire —
+        # panoul citește cadența din `repeat`, nu de aici.
+        "_rule": rec.get("rule") if rec.get("is_template") else None,
         "trashed": bool((task.get("flags") or {}).get("trashed")),
         "sort": idx.get("sort_index") or 0,
         "todaySort": idx.get("today_sort_index") or 0,
@@ -304,7 +487,7 @@ VIEWS = [
 ]
 
 
-def snapshot(do_sync=True, logbook_days=14):
+def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
     today = date.today()
     out = {
         "ok": True,
@@ -427,6 +610,16 @@ def snapshot(do_sync=True, logbook_days=14):
             "title": raw.get("title") or "",
         })
 
+    # Ocurențele proiectate intră *după* progresul pe proiect (n-au voie să fie
+    # numărate ca muncă reală) și *înainte* de counts, ca insigna din bară să
+    # arate exact câte rânduri vede omul în Upcoming.
+    for proiectie in proiecteaza(out["tasks"], today, orizont=projection_days):
+        out["tasks"][proiectie["id"]] = proiectie
+        out["views"].setdefault("upcoming", []).append(proiectie["id"])
+
+    for task in out["tasks"].values():
+        task.pop("_rule", None)
+
     stamp = today.isoformat()
     counts = {name: len(ids) for name, ids in out["views"].items()}
     counts["projects"] = len(out["projects"])
@@ -448,10 +641,14 @@ def main():
                         help="citește doar cache-ul local, fără sincronizare cu norul")
     parser.add_argument("--logbook-days", type=int, default=14,
                         help="câte zile de logbook intră în instantaneu (implicit 14)")
+    parser.add_argument("--projection-days", type=int, default=ORIZONT_PROIECTII,
+                        help="cât de departe se proiectează recurențele în Upcoming "
+                             "(implicit %d zile; 0 le oprește)" % ORIZONT_PROIECTII)
     args = parser.parse_args()
 
     try:
-        data = snapshot(do_sync=not args.no_sync, logbook_days=args.logbook_days)
+        data = snapshot(do_sync=not args.no_sync, logbook_days=args.logbook_days,
+                        projection_days=args.projection_days)
     except Exception as exc:  # noqa: BLE001 — nimic nu are voie să iasă fără JSON
         data = {
             "ok": False,
