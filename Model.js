@@ -1363,9 +1363,9 @@ function randuriInProiect(instantaneu, idProiect, desfasurate, aratacomplete) {
   var toate = []
   for (var id in instantaneu.tasks) {
     var task = instantaneu.tasks[id]
-    // Ocurențele proiectate trăiesc doar în Upcoming, unde ziua le dă rostul.
-    // Aici, într-o listă sortată manual și plină de bife, șase copii ale
-    // aceluiași task recurent ar fi numai zgomot.
+    // Ocurențele proiectate trăiesc în Today și Upcoming, unde ziua le dă
+    // rostul. Aici, într-o listă sortată manual și plină de bife, șase copii
+    // ale aceluiași task recurent ar fi numai zgomot.
     if (task.type !== "todo" || task.projected) {
       continue
     }

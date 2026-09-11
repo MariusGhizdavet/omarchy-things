@@ -247,11 +247,12 @@ def termen(stamp):
 # Un task recurent din Things e două lucruri: un *șablon* (invizibil, fără dată,
 # purtătorul regulii) și *instanțele* materializate din el. CLI-ul nu pune
 # șabloanele în nicio vedere, iar instanțele apar abia în preajma zilei lor —
-# așa că „Upcoming" nu arăta nimic recurent, deși regula e cunoscută.
+# așa că nu se vedea nimic recurent, deși regula e cunoscută.
 #
-# Aici se calculează ocurențele următoare din regulă și se adaugă în Upcoming
-# ca rânduri *proiectate*: se văd, dar nu se pot bifa ori edita, fiindcă până
-# nu le materializează Things n-au un id pe care CLI-ul să-l accepte.
+# Aici se calculează ocurențele următoare din regulă și se adaugă în vederile
+# după zi: cea de azi în „Today", restul în „Upcoming". Sunt rânduri
+# *proiectate*: se văd, dar nu se pot bifa ori edita, fiindcă până nu le
+# materializează Things n-au un id pe care CLI-ul să-l accepte.
 #
 # Ancora nu e `rule.ia` (pe un șablon îl găsești și cu ia = epoca zero), ci
 # ultima instanță materializată — data care s-a verificat deja pe teren. Se
@@ -362,9 +363,11 @@ def proiecteaza(tasks, azi, orizont=ORIZONT_PROIECTII, maxim=PROIECTII_PE_SABLON
             if zi is None or zi > limita:
                 break
             iso = zi.isoformat()
-            # Azi și trecutul sunt treaba CLI-ului: ce e materializat stă deja
-            # în „Today", iar ce nu e materializat n-a fost niciodată datorat.
-            if iso <= stamp or iso in zile:
+            # Trecutul rămâne al CLI-ului: o ocurență veche pe care Things n-a
+            # materializat-o n-a fost niciodată un task real, deci n-are ce
+            # căuta printre restanțe. Ziua de azi intră însă — dacă instanța de
+            # azi încă n-a apărut, treaba tot azi e de făcut.
+            if iso < stamp or iso in zile:
                 continue
             proiectii.append(ocurenta(sablon, iso))
             gasite += 1
@@ -613,9 +616,11 @@ def snapshot(do_sync=True, logbook_days=14, projection_days=ORIZONT_PROIECTII):
     # Ocurențele proiectate intră *după* progresul pe proiect (n-au voie să fie
     # numărate ca muncă reală) și *înainte* de counts, ca insigna din bară să
     # arate exact câte rânduri vede omul în Upcoming.
+    azi_iso = today.isoformat()
     for proiectie in proiecteaza(out["tasks"], today, orizont=projection_days):
         out["tasks"][proiectie["id"]] = proiectie
-        out["views"].setdefault("upcoming", []).append(proiectie["id"])
+        vedere = "today" if proiectie["when"] == azi_iso else "upcoming"
+        out["views"].setdefault(vedere, []).append(proiectie["id"])
 
     for task in out["tasks"].values():
         task.pop("_rule", None)

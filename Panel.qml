@@ -1693,9 +1693,6 @@ Panel {
         anchors.leftMargin: Style.space(8) + (rand.linie ? rand.linie.depth * Style.space(16) : 0)
         anchors.rightMargin: Style.space(8)
         implicitHeight: Math.max(bifa.implicitHeight, infoRand.implicitHeight, actiuni.implicitHeight)
-        // O ocurență care încă nu există se citește ca o umbră a rândului
-        // care va veni în ziua ei.
-        opacity: rand.proiectat ? 0.5 : 1.0
 
         Text {
           id: bifa
