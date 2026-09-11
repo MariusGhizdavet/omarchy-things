@@ -137,8 +137,14 @@ rm -rf ~/.local/state/things3      # cached tasks and your saved credentials
   <img src="docs/upcoming.png" alt="The Upcoming view: tasks grouped under Tomorrow and then each dated day, one row showing its four action buttons" width="550">
 
 - **Work the list.** Complete and un-complete, quick-add, reschedule, move
-  between Inbox / projects / areas, rename inline, and delete with a
-  confirmation. Checklists expand under their task and tick off individually.
+  between Inbox / projects / areas, rename inline, edit the notes, cancel, and
+  delete with a confirmation. Checklists expand under their task and tick off
+  individually; items can be added, renamed and removed from the row itself.
+
+- **Canceled is not completed.** Things keeps the two apart — one says you did
+  the thing, the other that you gave up on it — so the panel does too: a
+  canceled task carries a crossed circle rather than a tick, and the row action
+  cancels rather than completing. Enter on a canceled task brings it back.
 
   <img src="docs/when.png" alt="The when sheet: Today, This Evening, Tomorrow, Anytime and Someday buttons above a field that takes a date in words" width="550">
 

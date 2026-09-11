@@ -103,7 +103,7 @@ Panel {
   property string vedere: "today"
   // Proiectul în care s-a intrat din vederea „Proiecte"; "" înseamnă lista.
   property string proiectDeschis: ""
-  // "list" | "search" | "when" | "move" | "rename" | "help"
+  // "list" | "search" | "when" | "move" | "rename" | "notes" | "help"
   property string mod: "list"
   property string interogare: ""
   // Task-ul pe care lucrează foaia deschisă (când / mută / redenumește).
@@ -276,10 +276,10 @@ Panel {
     if (r.kind === "task") {
       // Ocurențele proiectate n-au un id pe care CLI-ul să-l accepte, deci
       // n-au nici butoane — cursorul orizontal nu are unde să meargă.
-      return r.task && r.task.projected ? 0 : 4
+      return r.task && r.task.projected ? 0 : 6
     }
     if (r.kind === "check") {
-      return 0
+      return 2
     }
     if (r.kind === "project") {
       return 0
@@ -443,6 +443,56 @@ Panel {
     local[task.id] = gata ? "completed" : "incomplete"
     stariLocale = local
     executa(["mark", gata ? "--done" : "--incomplete", task.id])
+  }
+
+  // Anulat nu e totuna cu terminat: Things le ține separat, iar „am renunțat"
+  // spune altceva decât „am făcut". Enter pe un rând anulat îl readuce la
+  // incomplete, prin marcheaza(), deci reversul nu are nevoie de buton.
+  function anuleaza(task) {
+    if (!task || task.projected || task.status === "canceled") {
+      return
+    }
+    var local = {}
+    for (var k in stariLocale) {
+      local[k] = stariLocale[k]
+    }
+    local[task.id] = "canceled"
+    stariLocale = local
+    executa(["mark", "--canceled", task.id])
+  }
+
+  function editeazaNotite(task, text) {
+    if (!task || task.projected) {
+      return
+    }
+    // Șirul gol e valid și înseamnă „șterge notițele" — CLI-ul îl documentează
+    // ca atare, deci nu se filtrează ca o valoare lipsă.
+    executa(["edit", "--notes", String(text), task.id])
+  }
+
+  function adaugaInChecklist(task, titlu) {
+    var curat = String(titlu || "").trim()
+    if (!task || task.projected || curat === "") {
+      return
+    }
+    executa(["edit", "--add-checklist", curat, task.id])
+  }
+
+  function redenumesteItem(parinte, item, titlu) {
+    var curat = String(titlu || "").trim()
+    if (!parinte || !item || curat === "") {
+      return
+    }
+    // `sid:titlu` e formatul cerut de CLI; două puncte în titlu nu strică
+    // nimic, fiindcă el desparte doar la primul.
+    executa(["edit", "--rename-checklist", item.sid + ":" + curat, parinte.id])
+  }
+
+  function stergeItem(parinte, item) {
+    if (!parinte || !item) {
+      return
+    }
+    executa(["edit", "--remove-checklist", item.sid, parinte.id])
   }
 
   function comutaBifa(task) {
@@ -624,6 +674,7 @@ Panel {
     if (mod !== "list") {
       mod = "list"
       tintaFoaie = ""
+      tintaItem = ""
       laInceput()
       return
     }
@@ -650,6 +701,27 @@ Panel {
     return Model.taskDupaId(instantaneuEfectiv, tintaFoaie)
   }
 
+  // `sid`-ul elementului de checklist pe care îl editează foaia, gol când
+  // foaia e despre task-ul întreg.
+  property string tintaItem: ""
+
+  onModChanged: if (mod !== "renameItem") {
+    tintaItem = ""
+  }
+
+  readonly property var itemFoaie: {
+    if (tintaItem === "" || !taskFoaie) {
+      return null
+    }
+    var lista = taskFoaie.checklist || []
+    for (var i = 0; i < lista.length; i++) {
+      if (lista[i].sid === tintaItem) {
+        return lista[i]
+      }
+    }
+    return null
+  }
+
   // ------------------------------------------------------------------- taste
 
   function activeazaCursorul() {
@@ -659,6 +731,10 @@ Panel {
     }
     if (indexActiune >= 0 && r.kind === "task") {
       declanseazaActiunea(r.task, indexActiune)
+      return
+    }
+    if (indexActiune >= 0 && r.kind === "check") {
+      declanseazaActiuneaItem(r.parent, r.item, indexActiune)
       return
     }
     if (r.kind === "task") {
@@ -684,7 +760,25 @@ Panel {
       tintaFoaie = task.id
       mod = "rename"
     } else if (index === 3) {
+      tintaFoaie = task.id
+      mod = "notes"
+    } else if (index === 4) {
+      anuleaza(task)
+    } else if (index === 5) {
       cereStergerea(task)
+    }
+  }
+
+  function declanseazaActiuneaItem(parinte, item, index) {
+    if (!parinte || !item) {
+      return
+    }
+    if (index === 0) {
+      tintaFoaie = parinte.id
+      tintaItem = item.sid
+      mod = "renameItem"
+    } else if (index === 1) {
+      stergeItem(parinte, item)
     }
   }
 
@@ -730,6 +824,10 @@ Panel {
       deschideFoaia("move")
     } else if (text === "e") {
       deschideFoaia("rename")
+    } else if (text === "t") {
+      deschideFoaia("notes")
+    } else if (text === "a") {
+      deschideFoaia("addItem")
     } else if (text === "c") {
       comutaDesfasurarea(taskSelectat)
     } else if (text === "o") {
@@ -934,6 +1032,7 @@ Panel {
       // adăugarea în loc să ajungă în text.
       blocked: campAdaugare.activeFocus || campCautare.activeFocus
         || root.mod === "when" || root.mod === "move" || root.mod === "rename"
+        || root.mod === "notes" || root.mod === "addItem" || root.mod === "renameItem"
         || dialogStergere.opened
 
       onCloseRequested: root.inapoi()
@@ -1458,6 +1557,24 @@ Panel {
           sourceComponent: componentaFoaieRedenumire
         }
 
+        // ---------- foaia „notițe" ----------
+        Loader {
+          width: parent.width
+          active: root.mod === "notes"
+          visible: active
+          height: visible && item ? item.implicitHeight : 0
+          sourceComponent: componentaFoaieNotite
+        }
+
+        // ---------- foile checklist-ului ----------
+        Loader {
+          width: parent.width
+          active: root.mod === "addItem" || root.mod === "renameItem"
+          visible: active
+          height: visible && item ? item.implicitHeight : 0
+          sourceComponent: componentaFoaieItem
+        }
+
         // ---------- setările ----------
         //
         // Limba e singura setare care merită un loc în panou: celelalte se
@@ -1526,7 +1643,7 @@ Panel {
           }
 
           Repeater {
-            model: ["help.move", "help.views", "help.actions", "help.add", "help.settings"]
+            model: ["help.move", "help.views", "help.actions", "help.checklist", "help.add", "help.settings"]
             Text {
               required property var modelData
               width: parent.width
@@ -1643,6 +1760,10 @@ Panel {
 
       readonly property var task: linie ? linie.task : null
       readonly property bool bifat: task && task.status !== "incomplete"
+      // Things ține „anulat" separat de „terminat", iar diferența contează:
+      // una spune că ai făcut lucrul, cealaltă că ai renunțat la el. Fără
+      // rândul ăsta amândouă ar ieși ca o bifă tăiată, de nedeosebit.
+      readonly property bool anulat: task && task.status === "canceled"
       // O ocurență calculată din regulă, nu un task pe care îl are Things:
       // se vede, dar nu se atinge.
       readonly property bool proiectat: task && task.projected === true
@@ -1700,7 +1821,7 @@ Panel {
           anchors.left: parent.left
           anchors.top: parent.top
           anchors.topMargin: Style.space(1)
-          text: rand.bifat ? "󰄳" : "󰄰"
+          text: rand.anulat ? "󰅙" : (rand.bifat ? "󰄳" : "󰄰")
           color: rand.bifat ? Qt.darker(root.culoareText, 1.6) : root.culoareText
           font.family: root.fontulBarei
           font.pixelSize: Style.font.heading
@@ -1860,23 +1981,48 @@ Panel {
           }
 
           ActiuneRand {
+            iconText: "󰈙"
+            tooltipText: I18n.t(root.limba, "action.notes")
+            aleasa: rand.selectat && root.indexActiune === 3
+            onApasat: {
+              root.tintaFoaie = rand.task.id
+              root.mod = "notes"
+            }
+            onIntrat: root.punecursorul(rand.indexRand, 3)
+          }
+
+          ActiuneRand {
+            iconText: "󰅚"
+            tooltipText: I18n.t(root.limba, "action.cancel")
+            aleasa: rand.selectat && root.indexActiune === 4
+            onApasat: root.anuleaza(rand.task)
+            onIntrat: root.punecursorul(rand.indexRand, 4)
+          }
+
+          ActiuneRand {
             iconText: "󰆴"
             tooltipText: I18n.t(root.limba, "action.delete")
             urgenta: true
-            aleasa: rand.selectat && root.indexActiune === 3
+            aleasa: rand.selectat && root.indexActiune === 5
             onApasat: root.cereStergerea(rand.task)
-            onIntrat: root.punecursorul(rand.indexRand, 3)
+            onIntrat: root.punecursorul(rand.indexRand, 5)
           }
         }
       }
 
       PanelToolTip {
         visible: mouseRand.containsMouse && root.indexActiune < 0 && rand.task !== null
-        text: rand.proiectat
-          ? I18n.t(root.limba, "task.projected")
-          : (rand.bifat
+        text: {
+          if (rand.proiectat) {
+            return I18n.t(root.limba, "task.projected")
+          }
+          if (rand.anulat) {
+            return I18n.t(root.limba, "action.uncancel")
+          }
+          return rand.bifat
             ? I18n.t(root.limba, "action.uncheck")
-            : I18n.t(root.limba, "action.check"))
+            : I18n.t(root.limba, "action.check")
+        }
         fontFamily: root.fontulBarei
       }
     }
@@ -1923,7 +2069,8 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
         anchors.leftMargin: Style.space(8) + (randCheck.linie ? randCheck.linie.depth * Style.space(18) : 0)
         anchors.rightMargin: Style.space(8)
-        implicitHeight: Math.max(bifaCheck.implicitHeight, textCheck.implicitHeight)
+        implicitHeight: Math.max(bifaCheck.implicitHeight, textCheck.implicitHeight,
+                                 actiuniCheck.implicitHeight)
 
         Text {
           id: bifaCheck
@@ -1941,7 +2088,8 @@ Panel {
           id: textCheck
           anchors.left: bifaCheck.right
           anchors.leftMargin: Style.space(8)
-          anchors.right: parent.right
+          anchors.right: actiuniCheck.visible ? actiuniCheck.left : parent.right
+          anchors.rightMargin: actiuniCheck.visible ? Style.space(6) : 0
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
           text: randCheck.item ? randCheck.item.title : ""
@@ -1951,6 +2099,33 @@ Panel {
           font.pixelSize: Style.font.bodySmall
           font.strikeout: randCheck.item && randCheck.item.done
           elide: Text.ElideRight
+        }
+
+        // Un element de checklist se putea doar bifa. Redenumirea și ștergerea
+        // stau unde le caută omul — pe marginea rândului, ca la task-uri.
+        Row {
+          id: actiuniCheck
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(2)
+          visible: mouseCheck.containsMouse || randCheck.selectat
+
+          ActiuneRand {
+            iconText: "󰏫"
+            tooltipText: I18n.t(root.limba, "checklist.rename")
+            aleasa: randCheck.selectat && root.indexActiune === 0
+            onApasat: root.declanseazaActiuneaItem(randCheck.parinte, randCheck.item, 0)
+            onIntrat: root.punecursorul(randCheck.indexRand, 0)
+          }
+
+          ActiuneRand {
+            iconText: "󰆴"
+            tooltipText: I18n.t(root.limba, "checklist.delete")
+            urgenta: true
+            aleasa: randCheck.selectat && root.indexActiune === 1
+            onApasat: root.declanseazaActiuneaItem(randCheck.parinte, randCheck.item, 1)
+            onIntrat: root.punecursorul(randCheck.indexRand, 1)
+          }
         }
       }
     }
@@ -2333,6 +2508,149 @@ Panel {
   }
 
   // „Redenumește": un câmp pornit de la titlul curent.
+  // Notițele sunt text pe mai multe rânduri, deci nu încap în TextField-ul
+  // kit-ului. Rama, umplerea și marginile vin din aceleași funcții pe care le
+  // folosește Ui/TextField.qml, ca să nu fie un câmp străin în panou.
+  //
+  // Enter scrie un rând nou, deci salvarea e Ctrl+Enter — altfel n-ai putea
+  // scrie o notiță de două rânduri fără s-o trimiți la mijloc.
+  Component {
+    id: componentaFoaieNotite
+
+    Column {
+      width: parent ? parent.width : 0
+      spacing: Style.space(8)
+
+      PanelSectionHeader {
+        text: I18n.t(root.limba, "action.notes").toUpperCase()
+        foreground: root.culoareText
+        fontFamily: root.fontulBarei
+        width: parent.width
+      }
+
+      TextArea {
+        id: campNotite
+        width: parent.width
+
+        readonly property bool focalizat: activeFocus
+        readonly property var specRama: Border.controlSpec(
+          focalizat ? "focus" : (hovered ? "hover-cursor" : "normal"),
+          root.culoareText, Color.accent)
+
+        // Crește cu textul, între patru rânduri și cam zece: mai jos nu merită
+        // o casetă, mai sus ar împinge lista afară din panou.
+        height: Math.min(Math.max(contentHeight + topPadding + bottomPadding,
+                                  Style.space(76)), Style.space(200))
+
+        wrapMode: TextEdit.Wrap
+        selectByMouse: true
+        placeholderText: I18n.t(root.limba, "notes.placeholder")
+        text: root.taskFoaie ? (root.taskFoaie.notes || "") : ""
+
+        font.family: root.fontulBarei
+        font.pixelSize: Style.font.body
+        color: root.culoareText
+        selectionColor: Style.selectionFillFor(root.culoareText, Color.accent)
+        selectedTextColor: root.culoareText
+        placeholderTextColor: Qt.darker(root.culoareText, 1.6)
+
+        leftPadding: Style.spacing.controlPaddingX + Border.left(specRama)
+        rightPadding: Style.spacing.controlPaddingX + Border.right(specRama)
+        topPadding: Style.space(5) + Border.top(specRama)
+        bottomPadding: Style.space(5) + Border.bottom(specRama)
+
+        background: BorderSurface {
+          color: Style.controlFill(campNotite.focalizat, campNotite.hovered,
+                                   root.culoareText, Color.accent)
+          borderSpec: campNotite.specRama
+          radius: Style.cornerRadius
+        }
+
+        Keys.onPressed: function (event) {
+          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+              && (event.modifiers & Qt.ControlModifier)) {
+            root.editeazaNotite(root.taskFoaie, campNotite.text)
+            root.inapoi()
+            prinzatorTaste.forceActiveFocus()
+            event.accepted = true
+          }
+        }
+        Keys.onEscapePressed: function (event) {
+          root.inapoi()
+          prinzatorTaste.forceActiveFocus()
+          event.accepted = true
+        }
+        Component.onCompleted: {
+          forceActiveFocus()
+          cursorPosition = length
+        }
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        text: I18n.t(root.limba, "notes.hint")
+        color: Qt.darker(root.culoareText, 1.5)
+        font.family: root.fontulBarei
+        font.pixelSize: Style.font.caption
+      }
+    }
+  }
+
+  // O singură foaie pentru ambele treburi cu checklist-ul: adaugă un element
+  // nou sau redenumește-l pe cel ales. Diferența e doar textul de pornire și
+  // ce se face la Enter, deci două componente aproape identice ar fi fost o
+  // copie inutilă.
+  Component {
+    id: componentaFoaieItem
+
+    Column {
+      width: parent ? parent.width : 0
+      spacing: Style.space(8)
+
+      readonly property bool adauga: root.mod === "addItem"
+
+      PanelSectionHeader {
+        text: I18n.t(root.limba, parent.adauga ? "checklist.add" : "checklist.rename").toUpperCase()
+        foreground: root.culoareText
+        fontFamily: root.fontulBarei
+        width: parent.width
+      }
+
+      TextField {
+        id: campItem
+        width: parent.width
+        foreground: root.culoareText
+        accent: Color.accent
+        font.family: root.fontulBarei
+        font.pixelSize: Style.font.body
+        verticalPadding: Style.space(5)
+        placeholderText: I18n.t(root.limba, "checklist.placeholder")
+        text: parent.adauga ? "" : (root.itemFoaie ? root.itemFoaie.title : "")
+
+        onAccepted: {
+          if (parent.adauga) {
+            root.adaugaInChecklist(root.taskFoaie, text)
+          } else {
+            root.redenumesteItem(root.taskFoaie, root.itemFoaie, text)
+          }
+          root.inapoi()
+          prinzatorTaste.forceActiveFocus()
+        }
+        Keys.onEscapePressed: function (event) {
+          root.inapoi()
+          prinzatorTaste.forceActiveFocus()
+          event.accepted = true
+        }
+        Component.onCompleted: {
+          forceActiveFocus()
+          selectAll()
+        }
+      }
+    }
+  }
+
   Component {
     id: componentaFoaieRedenumire
 
