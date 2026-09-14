@@ -336,6 +336,14 @@ read as the nearest local midnight, while genuine moments (created, modified,
 completed) are read as plain local dates: a task ticked at 23:40 was ticked
 that day, not the next one.
 
+Writing goes the other way. Things itself stores a day as midnight UTC and its
+own clients read the day back out of UTC, so an explicit date written as local
+midnight is a day early for anyone east of Greenwich — a task put on tomorrow
+showed up in Today on the iPhone. Any `things3` call that carries a real
+`--when` or `--deadline` date is therefore run with `TZ=UTC`, which makes the
+CLI write the same shape Things does. Only those: `today` and `evening` still
+have to resolve in the local zone, or "today" would mean yesterday until 3 a.m.
+
 ## IPC
 
 ```sh

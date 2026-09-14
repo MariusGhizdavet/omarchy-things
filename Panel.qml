@@ -411,6 +411,31 @@ Panel {
     porneste()
   }
 
+  // Un „YYYY-MM-DD" dat lui `things3` e scris ca miezul nopții **local** —
+  // 21:00 UTC în ziua dinainte, pentru ora României. Things însă ține zilele
+  // ca miez de noapte UTC și citește ziua din UTC, așa că un task pus pe
+  // mâine ajungea pe azi în aplicația de pe iPhone. Cu TZ=UTC, CLI-ul scrie
+  // exact forma pe care o scrie și Things.
+  //
+  // Numai pentru comenzile care duc chiar o dată explicită: „today" și
+  // „evening" se rezolvă tot după fusul procesului, iar ăla trebuie să rămână
+  // cel local, altfel „azi" ar însemna ziua de ieri până la ora 3 dimineața.
+  readonly property var tiparDataIso: /^\d{4}-\d{2}-\d{2}$/
+
+  function areDataExplicita(argv) {
+    var i
+    for (i = 1; i < argv.length; i++) {
+      var optiune = String(argv[i - 1])
+      if (optiune !== "--when" && optiune !== "--deadline") {
+        continue
+      }
+      if (tiparDataIso.test(String(argv[i]))) {
+        return true
+      }
+    }
+    return false
+  }
+
   function porneste() {
     if (ruleazaActiune || coadaActiuni.length === 0) {
       return
@@ -418,6 +443,7 @@ Panel {
     var urmator = coadaActiuni[0]
     coadaActiuni = coadaActiuni.slice(1)
     ruleazaActiune = true
+    actiune.environment = areDataExplicita(urmator) ? ({ "TZ": "UTC" }) : ({})
     actiune.command = ["things3"].concat(urmator)
     actiune.running = true
   }
